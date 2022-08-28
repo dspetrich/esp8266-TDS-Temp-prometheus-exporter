@@ -1,72 +1,81 @@
-#include <Adafruit_BME280.h>
-#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>  // delete !
+#include <Adafruit_Sensor.h>  // delete !
+#include <DallasTemperature.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
+#include <OneWire.h>
 #include <Wire.h>
 
 #include "config.h"
 #include "version.h"
 
-// Board name
-#define BOARD_NAME "ESP8266"
-// Sensor name (should be the same)
-#define SENSOR_NAME "BME-1"
-// Sensor type
-// #define SENSOR_TYPE BME280
-// Sensor address
-#define BME_ADDRESS 0x76
-// Temperature offset in degrees Celsius
-#define TEMPERATURE_CORRECTION_OFFSET 0
-// Humidity offset in percent
-#define HUMIDITY_CORRECTION_OFFSET 0
-// How long to cache the sensor results, in milliseconds
-#define READ_INTERVAL 1000
-// How many times to try to read the sensor before returning an error
-#define READ_TRY_COUNT 5
-
-#define EXPLODE4(arr) (arr[0], arr[1], arr[2], arr[3])
-
-#define SEALEVELPRESSURE_HPA (1013.25)
-
+// Debug mode is enabled if not zero
+#define DEBUG_MODE 1
 enum LogLevel {
   DEBUG,
   INFO,
   ERROR,
 };
 
-Adafruit_BME280 bme_sensor;
-ESP8266WebServer server(HTTP_SERVER_PORT);
+// Board name
+#define BOARD_NAME "ESP8266"
+// Sensor name (should be the same)
+#define SENSOR_NAME "TDS-Temp-Sensor"
+// How long to cache the sensor results, in milliseconds
+#define READ_SENSOR_INTERVAL 1000U
+// How many times to try to read the sensor before returning an error
+#define READ_TRY_COUNT 5
 
-void setup_bme_sensor();
+// EC-Sensor stuff
+#define TdsSensorPin A0
+#define VREF 5.0   // analog reference voltage(Volt) of the ADC
+#define SCOUNT 30  // sum of sample point
+#define TDS_CORRECTION_FACTOR 0.78F  // from calibration!
+#define TDS_TO_EC_FACTOR 0.002F
+#define READ_TDS_ANALOG_INTERVAL \
+  40U  // every 40 milliseconds,read the analog value from the ADC
+
+int analogBuffer[SCOUNT];  // store the analog value in the array, read from ADC
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0, copyIndex = 0;
+float averageVoltage = 0., tdsValue = 0., ecValue = 0., temperature = 25.;
+
+// Include DS18B20 stuff
+// Der PIN D4 (GPIO 2) wird als BUS-Pin verwendet
+#define ONE_WIRE_BUS 2
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature DS18B20(&oneWire);
+
+// HTTP Server
+ESP8266WebServer http_server(HTTP_SERVER_PORT);
+
+void setup_sensors();
 void setup_wifi();
 void setup_http_server();
 void handle_http_home_client();
 void handle_http_metrics_client();
-void read_sensors(boolean force = false);
-bool read_sensor(float (*function)(), float *value);
+void read_sensors();
 void log(char const *message, LogLevel level = LogLevel::INFO);
-
-float temperature, humidity, pressure, altitude;
-// float humidity, temperature, heat_index;
-uint32_t previous_read_time = 0;
 
 void setup(void) {
   char message[128];
   Serial.begin(SERIAL_PORT_NUM);
-  setup_bme_sensor();
+
   setup_wifi();
   setup_http_server();
   snprintf(message, 128, "Prometheus namespace: %s", PROM_NAMESPACE);
   log(message);
+  setup_sensors();
   log("Setup done");
 }
 
-void setup_bme_sensor() {
-  log("Setting up BME280 sensor");
-  bme_sensor.begin(BME280_ADDRESS);
-  // Test read
-  read_sensors(true);
-  log("DHT sensor ready", LogLevel::DEBUG);
+void setup_sensors() {
+  log("Setting up sensors");
+  // Analog pin (TDS Sensor)
+  pinMode(TdsSensorPin, INPUT);
+  // DS18B20 initialisieren (Temparature sensor)
+  DS18B20.begin();
+  log("Sensors ready", LogLevel::DEBUG);
 }
 
 void setup_wifi() {
@@ -152,9 +161,7 @@ void handle_http_root() {
   log_request();
   static size_t const BUFSIZE = 256;
   static char const *response_template =
-      "Prometheus ESP8266 DHT Exporter by HON95.\n"
-      "\n"
-      "Project: https://github.com/HON95/prometheus-esp8266-dht-exporter\n"
+      "Prometheus ESP8266 DHT Exporter by DSP.\n"
       "\n"
       "Usage: %s\n";
   char response[BUFSIZE];
@@ -173,36 +180,34 @@ void handle_http_metrics() {
       "# UNIT " PROM_NAMESPACE "_info \n" PROM_NAMESPACE
       "_info{version=\"%s\",board=\"%s\",sensor=\"%s\"} 1\n"
       "# HELP " PROM_NAMESPACE
-      "_air_humidity_percent Air humidity.\n"
+      "_water_temperture_celsius Water temperature.\n"
       "# TYPE " PROM_NAMESPACE
-      "_air_humidity_percent gauge\n"
-      "# UNIT " PROM_NAMESPACE "_air_humidity_percent %%\n" PROM_NAMESPACE
-      "_air_humidity_percent %f\n"
-      "# HELP " PROM_NAMESPACE
-      "_air_temperature_celsius Air temperature.\n"
-      "# TYPE " PROM_NAMESPACE
-      "_air_temperature_celsius gauge\n"
+      "_water_temperture_celsius gauge\n"
       "# UNIT " PROM_NAMESPACE
-      "_air_temperature_celsius \u00B0C\n" PROM_NAMESPACE
-      "_air_temperature_celsius %f\n"
+      "_water_temperture_celsius \u00B0C\n" PROM_NAMESPACE
+      "_water_temperture_celsius %f\n"
       "# HELP " PROM_NAMESPACE
-      "_air_heat_index_celsius Apparent air temperature, based on temperature "
-      "and humidity.\n"
+      "_water_EC_value_mS Water EC Value.\n"
       "# TYPE " PROM_NAMESPACE
-      "_air_heat_index_celsius gauge\n"
-      "# UNIT " PROM_NAMESPACE
-      "_air_heat_index_celsius \u00B0C\n" PROM_NAMESPACE
-      "_air_heat_index_celsius %f\n";
+      "_water_EC_value_mS gauge\n"
+      "# UNIT " PROM_NAMESPACE "_water_EC_value_mS mS\n" PROM_NAMESPACE
+      "_water_EC_value_mS %f\n"
+      "# HELP " PROM_NAMESPACE
+      "_water_TDS_value_PPT Water TDS Value\n"
+      "# TYPE " PROM_NAMESPACE
+      "_water_TDS_value_PPT gauge\n"
+      "# UNIT " PROM_NAMESPACE "_water_TDS_value_PPT PPT\n" PROM_NAMESPACE
+      "_water_TDS_value_PPT %f\n";
 
   read_sensors();
-  if (isnan(humidity) || isnan(temperature) || isnan(heat_index)) {
+  if (isnan(temperature) || isnan(ecValue) || isnan(tdsValue)) {
     http_server.send(500, "text/plain; charset=utf-8", "Sensor error.");
     return;
   }
 
   char response[BUFSIZE];
-  snprintf(response, BUFSIZE, response_template, VERSION, BOARD_NAME, DHT_NAME,
-           humidity, temperature, heat_index);
+  snprintf(response, BUFSIZE, response_template, VERSION, BOARD_NAME,
+           SENSOR_NAME, temperature, ecValue, tdsValue);
   http_server.send(200, "text/plain; charset=utf-8", response);
 }
 
@@ -211,69 +216,80 @@ void handle_http_not_found() {
   http_server.send(404, "text/plain; charset=utf-8", "Not found.");
 }
 
-void read_sensors(boolean force) {
-  uint32_t current_time = millis();
-  if (!force && current_time - previous_read_time < READ_INTERVAL) {
-    log("Sensors were recently read, will not read again yet.",
-        LogLevel::DEBUG);
-    return;
+void read_sensors() {
+  char message[64];
+  log("Read sensors...", LogLevel::DEBUG);
+  static unsigned long analogSampleTimepoint = millis();
+  if (millis() - analogSampleTimepoint > READ_TDS_ANALOG_INTERVAL) {
+    analogSampleTimepoint = millis();
+    analogBuffer[analogBufferIndex] = analogRead(
+        TdsSensorPin);  // read the analog value and store into the buffer
+    analogBufferIndex++;
+    if (analogBufferIndex == SCOUNT) analogBufferIndex = 0;
   }
-  previous_read_time = current_time;
+  static unsigned long printTimepoint = millis();
+  if (millis() - printTimepoint > READ_SENSOR_INTERVAL) {
+    printTimepoint = millis();
 
-  read_temperature_sensor();
+    // read and print temperature
+    DS18B20.requestTemperatures();
+    temperature = DS18B20.getTempCByIndex(0);
+    snprintf(message, 64, "Temperature: %f °C", temperature);
+    log(message, LogLevel::DEBUG);
 
-  temperature = bme_sensor.readTemperature();
-  humidity = bme_sensor.readHumidity();
-  pressure = bme_sensor.readPressure() / 100.0F;
-  altitude = bme_sensor.readAltitude(SEALEVELPRESSURE_HPA);
+    for (copyIndex = 0; copyIndex < SCOUNT; copyIndex++)
+      analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+    averageVoltage =
+        getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF /
+        1024.0;  // read the analog value more stable by the median filtering
+                 // algorithm, and convert to voltage value
+    float compensationCoefficient =
+        1.0 +
+        0.02 *
+            (temperature -
+             25.0);  // temperature compensation formula : fFinalResult(25 ^ C)
+                     // = fFinalResult(current) / (1.0 + 0.02 * (fTP - 25.0));
+    float compensationVolatge = averageVoltage / compensationCoefficient;
+    // temperature compensation
+    tdsValue = (133.42 * compensationVolatge * compensationVolatge *
+                    compensationVolatge -
+                255.86 * compensationVolatge * compensationVolatge +
+                857.39 * compensationVolatge) *
+               0.5 *
+               TDS_CORRECTION_FACTOR;  // convert voltage value to tds value
+    // Convert to EC value
+    ecValue = tdsValue * TDS_TO_EC_FACTOR;
+    snprintf(message, 64, "EC Value: %f mS", ecValue);
+    log(message, LogLevel::DEBUG);
+
+    // PPM (parts-per-million) to PPT (parts-per-thousands)
+    tdsValue = tdsValue * 0.001;
+    snprintf(message, 64, "TDS Value: %f PPT", tdsValue);
+    log(message, LogLevel::DEBUG);
+  }
 }
 
-void read_temperature_sensor() {
-  log("Reading temperature sensor ...", LogLevel::DEBUG);
-  bool result =
-      read_sensor([] { return bme_sensor.readTemperature(); }, &temperature);
-  if (result) {
-    temperature += TEMPERATURE_CORRECTION_OFFSET;
-  } else {
-    log("Failed to read temperature sensor.", LogLevel::ERROR);
-  }
-}
-
-void read_humidity_sensor() {
-  log("Reading humidity sensor ...", LogLevel::DEBUG);
-  bool result =
-      read_sensor([] { return bme_sensor.readHumidity(); }, &humidity);
-  if (result) {
-    humidity += HUMIDITY_CORRECTION_OFFSET;
-  } else {
-    log("Failed to read humidity sensor.", LogLevel::ERROR);
-  }
-}
-
-void read_pressure_sensor() {
-  log("Reading pressure sensor ...", LogLevel::DEBUG);
-  bool result =
-      read_sensor([] { return bme_sensor.readPressure() * 0.001F; }, &pressure);
-  if (result) {
-    humidity += HUMIDITY_CORRECTION_OFFSET;
-  } else {
-    log("Failed to read humidity sensor.", LogLevel::ERROR);
-  }
-}
-
-bool read_sensor(float (*function)(), float *value) {
-  bool success = false;
-  for (int i = 0; i < READ_TRY_COUNT; i++) {
-    *value = function();
-    if (!isnan(*value)) {
-      success = true;
-      break;
+int getMedianNum(int bArray[], int iFilterLen) {
+  int bTab[iFilterLen];
+  for (byte i = 0; i < iFilterLen; i++) bTab[i] = bArray[i];
+  int i, j, bTemp;
+  for (j = 0; j < iFilterLen - 1; j++) {
+    for (i = 0; i < iFilterLen - j - 1; i++) {
+      if (bTab[i] > bTab[i + 1]) {
+        bTemp = bTab[i];
+        bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+      }
     }
-    log("Failed to read sensor.", LogLevel::DEBUG);
   }
-  return success;
+  if ((iFilterLen & 1) > 0)
+    bTemp = bTab[(iFilterLen - 1) / 2];
+  else
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+  return bTemp;
 }
 
+// //////////////////////////////////////////////////////////////
 void log_request() {
   char message[128];
   char method_name[16];

@@ -1,17 +1,17 @@
-# Prometheus ESP8266 BME280 Exporter
+# Prometheus ESP8266 TDS DS18B20 Exporter
 
 [![GitHub release](https://img.shields.io/github/v/release/HON95/prometheus-esp8266-dht-exporter?label=Version)](https://github.com/HON95/prometheus-esp8266-dht-exporter/releases)
 
-An IoT Prometheus exporter for measuring temperature and humidity, using an ESP8266 (Arduino-compatible) with a Wi-Fi module and a DHT (temperature + humidity) sensor.
+An IoT Prometheus exporter for measuring temperature and humidity, using an ESP8266 (Arduino-compatible) with a Wi-Fi module and a TDS sensor combined with an DS18B20 waterprove temperature sensor.
 
 ## Metrics
 
 | Metric | Description | Unit |
 | - | - | - |
 | `iot_info` | Metadata about the device. | |
-| `iot_air_humidity_percent` | Air humidity. | `%` |
-| `iot_air_temperature_celsius` | Air temperature. | `°C` |
-| `iot_air_heat_index_celsius` | Apparent air temperature, based on temperature and humidity. | `°C` |
+| `iot_water_temperture_celsius` | Water temperature. | `°C` |
+| `_water_EC_value_mS` | Water EV value  temperature. | `mS` |
+| `_water_TDS_value_PPT` | Water PPT value | `PPT` |
 
 ## Requirements
 
@@ -19,10 +19,8 @@ An IoT Prometheus exporter for measuring temperature and humidity, using an ESP8
 
 - ESP8266-based board (or some other appropriate Arduino-based board).
     - Tested with "Adafruit Feather HUZZAH ESP8266" and "WEMOS D1 Mini".
-- DHT sensor.
-    - Tested with a cheap DHT11 from eBay and "Wemos DHT Shield" (using pin 2).
-    - DHT11 supports a maximum of 1Hz polling while DHT22 supports a maximum of 2Hz polling.
-    - Both DHT11 and DHT22 support both 3V and 5V at 2.5mA max current.
+- TDS Sensor
+- DS18B20 temperature sensor
 
 ### Software
 
@@ -38,27 +36,5 @@ An IoT Prometheus exporter for measuring temperature and humidity, using an ESP8
 
 ### Hardware
 
-Using the "Adafruit Feather HUZZAH ESP8266".
+Using the "AZ Deliverz D1 Mini ESP8266Mod 12-F".
 
-Wire the DHT sensor power to the 3.3V and any GND on the ESP and wire the data output to e.g. pin 14 (aka D5).
-
-### Software
-
-Using the Arduino IDE.
-
-1. Copy `config.default.h` to `config.h` and fill inn the details.
-1. Open `src/src.ino` in the Arduino IDE.
-1. Set the correct settings for the board.
-    - WEMOS D1 Mini uses board "WeMoS D1 R2 & mini".
-    - Adafruit Feather HUZZAH ESP8266 uses "Adafruit Feather HUZZAH ESP8266".
-1. Build and upload using the Arduino IDE.
-
-## Version
-
-See `src/version.h`.
-
-It's set manually since no build tools (or CI) other than the Arduino IDE is used.
-
-## License
-
-GNU General Public License version 3 (GPLv3).
